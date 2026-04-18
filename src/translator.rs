@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 
 use crate::jsonrpc::Message;
 
+const PROXY_ID_PREFIX: &str = "copilot-helix:inline:";
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Shared, cloneable translation state.
@@ -36,7 +38,7 @@ pub struct Translator {
 #[derive(Default)]
 struct Inner {
     /// Maps proxy-generated request id → original Helix request id.
-    pending: HashMap<u64, Value>,
+    pending: HashMap<String, Value>,
     /// Tracks the latest known document version by URI.
     document_versions: HashMap<String, i64>,
     next_id: u64,
@@ -103,19 +105,16 @@ impl Translator {
         let proxy_id = {
             let mut inner = self.inner.lock().expect("translator mutex poisoned");
             inner.next_id += 1;
-            let id = inner.next_id;
-            inner.pending.insert(id, helix_id);
+            let id = format!("{PROXY_ID_PREFIX}{}", inner.next_id);
+            inner.pending.insert(id.clone(), helix_id);
             id
         };
 
-        Message {
-            jsonrpc: "2.0".into(),
-            id: Some(Value::Number(proxy_id.into())),
-            method: Some("textDocument/inlineCompletion".into()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
+        Message::request_with_id(
+            Value::String(proxy_id),
+            "textDocument/inlineCompletion",
+            params,
+        )
     }
 
     /// Inspect a response arriving from the language server.
@@ -128,17 +127,14 @@ impl Translator {
             return msg;
         };
 
-        let proxy_id = match id {
-            Value::Number(n) => match n.as_u64() {
-                Some(v) => v,
-                None => return msg,
-            },
-            _ => return msg,
+        let proxy_id = match id.as_str() {
+            Some(value) => value,
+            None => return msg,
         };
 
         let helix_id = {
             let mut inner = self.inner.lock().expect("translator mutex poisoned");
-            inner.pending.remove(&proxy_id)
+            inner.pending.remove(proxy_id)
         };
 
         let Some(helix_id) = helix_id else {
@@ -186,13 +182,13 @@ impl Translator {
                 .pending
                 .iter()
                 .find(|(_, v)| *v == &helix_id)
-                .map(|(k, _)| *k)
+                .map(|(k, _)| k.clone())
         };
 
         if let Some(proxy_id) = proxy_id {
             if let Some(params) = msg.params.as_mut() {
                 if let Some(obj) = params.as_object_mut() {
-                    obj.insert("id".into(), Value::Number(proxy_id.into()));
+                    obj.insert("id".into(), Value::String(proxy_id));
                 }
             }
         }
@@ -209,14 +205,14 @@ impl Translator {
         if !msg.is_response() {
             return false;
         }
-        let Some(n) = id.as_u64() else {
+        let Some(proxy_id) = id.as_str() else {
             return false;
         };
         self.inner
             .lock()
             .expect("translator mutex poisoned")
             .pending
-            .contains_key(&n)
+            .contains_key(proxy_id)
     }
 
     /// Build the upstream inline-completion params using the latest known
@@ -674,5 +670,18 @@ mod tests {
         let resp1 = Message::success(r1.id.unwrap(), json!({ "items": [] }));
         let out1 = t.try_translate_response(resp1);
         assert_eq!(out1.id, Some(json!(10)));
+    }
+
+    #[test]
+    fn pending_completion_ids_do_not_match_numeric_upstream_responses() {
+        let t = Translator::new();
+        let req = t.translate_request(make_completion_request(7));
+        assert!(req.id.as_ref().and_then(Value::as_str).is_some());
+
+        let unrelated = Message::success(json!(1), json!({ "items": [] }));
+        let out = t.try_translate_response(unrelated.clone());
+
+        assert_eq!(out.id, unrelated.id);
+        assert_eq!(out.result, unrelated.result);
     }
 }

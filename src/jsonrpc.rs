@@ -114,9 +114,14 @@ impl Message {
 
     /// Build a request with the given numeric id.
     pub fn request(id: u64, method: impl Into<String>, params: Value) -> Self {
+        Self::request_with_id(Value::Number(id.into()), method, params)
+    }
+
+    /// Build a request with an arbitrary JSON-RPC id.
+    pub fn request_with_id(id: Value, method: impl Into<String>, params: Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),
-            id: Some(Value::Number(id.into())),
+            id: Some(id),
             method: Some(method.into()),
             params: Some(params),
             result: None,

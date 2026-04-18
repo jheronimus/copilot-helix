@@ -44,6 +44,11 @@ pub fn route(method: Option<&str>, dir: Direction) -> RouteAction {
         ("featureFlagsNotification", Direction::UpstreamToHelix) => RouteAction::Drop,
         ("didChangeStatus", Direction::UpstreamToHelix) => RouteAction::Drop,
         ("statusNotification", Direction::UpstreamToHelix) => RouteAction::Drop,
+        ("policy/didChange", Direction::UpstreamToHelix) => RouteAction::Drop,
+        ("copilot/mcpTools", Direction::UpstreamToHelix) => RouteAction::Drop,
+        ("conversation/preconditionsNotification", Direction::UpstreamToHelix) => {
+            RouteAction::Drop
+        }
 
         _ => RouteAction::PassThrough,
     }
@@ -83,6 +88,9 @@ mod tests {
             "featureFlagsNotification",
             "didChangeStatus",
             "statusNotification",
+            "policy/didChange",
+            "copilot/mcpTools",
+            "conversation/preconditionsNotification",
             "$/logTrace",
             "$/progress",
         ] {

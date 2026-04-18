@@ -18,6 +18,11 @@ use crate::{
     upstream::Upstream,
 };
 
+const CHECK_STATUS_REQUEST_ID: &str = "copilot-helix:auth:check-status";
+const INITIALIZE_REQUEST_ID: &str = "copilot-helix:auth:initialize";
+const SIGN_IN_REQUEST_ID: &str = "copilot-helix:auth:sign-in";
+const EXECUTE_COMMAND_REQUEST_ID: &str = "copilot-helix:auth:execute-command";
+
 // ── Proxy-mode: status check ──────────────────────────────────────────────────
 
 /// Send `checkStatus` to the language server after initialisation.
@@ -30,19 +35,19 @@ pub async fn check_and_warn(
     upstream: &mut Upstream,
     helix_tx: &mpsc::Sender<Message>,
 ) -> Result<()> {
-    const CHECK_ID: u64 = 1;
+    let request_id = internal_request_id(CHECK_STATUS_REQUEST_ID);
     debug!("sending checkStatus");
 
     upstream_tx
-        .send(Message::request(
-            CHECK_ID,
+        .send(Message::request_with_id(
+            request_id.clone(),
             "checkStatus",
             json!({ "options": { "localChecksOnly": true } }),
         ))
         .await
         .map_err(|_| anyhow::anyhow!("upstream closed before checkStatus"))?;
 
-    let status = await_response(CHECK_ID, upstream, Some(helix_tx))
+    let status = await_response(&request_id, upstream, Some(helix_tx))
         .await
         .context("waiting for checkStatus response")?;
 
@@ -85,16 +90,16 @@ pub async fn run_auth_flow() -> Result<()> {
     init_upstream(&mut upstream).await?;
 
     // Check whether the user is already signed in.
-    const CHECK_ID: u64 = 1;
+    let request_id = internal_request_id(CHECK_STATUS_REQUEST_ID);
     upstream
-        .send(Message::request(
-            CHECK_ID,
+        .send(Message::request_with_id(
+            request_id.clone(),
             "checkStatus",
             json!({ "options": { "localChecksOnly": false } }),
         ))
         .await?;
 
-    let status = await_response(CHECK_ID, &mut upstream, None).await?;
+    let status = await_response(&request_id, &mut upstream, None).await?;
     let status_str = status
         .get("status")
         .and_then(Value::as_str)
@@ -107,12 +112,16 @@ pub async fn run_auth_flow() -> Result<()> {
     }
 
     // Kick off the device flow.
-    const SIGN_IN_ID: u64 = 2;
+    let sign_in_id = internal_request_id(SIGN_IN_REQUEST_ID);
     upstream
-        .send(Message::request(SIGN_IN_ID, "signIn", json!({})))
+        .send(Message::request_with_id(
+            sign_in_id.clone(),
+            "signIn",
+            json!({}),
+        ))
         .await?;
 
-    let sign_in_data = await_response(SIGN_IN_ID, &mut upstream, None).await?;
+    let sign_in_data = await_response(&sign_in_id, &mut upstream, None).await?;
 
     let verification_uri = sign_in_data
         .get("verificationUri")
@@ -161,12 +170,12 @@ pub async fn run_auth_flow() -> Result<()> {
 /// Minimal LSP initialise / initialized / didChangeConfiguration sequence.
 /// Used only in `--auth` mode where there is no Helix client.
 async fn init_upstream(upstream: &mut Upstream) -> Result<()> {
-    const INIT_ID: u64 = 0;
+    let request_id = internal_request_id(INITIALIZE_REQUEST_ID);
     let initialization_options = build_initialization_options("unknown");
 
     upstream
-        .send(Message::request(
-            INIT_ID,
+        .send(Message::request_with_id(
+            request_id.clone(),
             "initialize",
             json!({
                 "capabilities": {
@@ -180,7 +189,7 @@ async fn init_upstream(upstream: &mut Upstream) -> Result<()> {
         .await?;
 
     // Wait for initialize response; discard notifications.
-    await_response(INIT_ID, upstream, None).await?;
+    await_response(&request_id, upstream, None).await?;
 
     upstream
         .send(Message::notification("initialized", json!({})))
@@ -194,19 +203,16 @@ async fn init_upstream(upstream: &mut Upstream) -> Result<()> {
 /// Execute the `workspace/executeCommand` from `signIn` and return the
 /// authenticated username on success.
 async fn confirm_sign_in(upstream: &mut Upstream, command: Value) -> Result<String> {
-    const EXEC_ID: u64 = 3;
+    let request_id = internal_request_id(EXECUTE_COMMAND_REQUEST_ID);
     upstream
-        .send(Message {
-            jsonrpc: "2.0".into(),
-            id: Some(json!(EXEC_ID)),
-            method: Some("workspace/executeCommand".into()),
-            params: Some(command),
-            result: None,
-            error: None,
-        })
+        .send(Message::request_with_id(
+            request_id.clone(),
+            "workspace/executeCommand",
+            command,
+        ))
         .await?;
 
-    let result = await_response(EXEC_ID, upstream, None).await?;
+    let result = await_response(&request_id, upstream, None).await?;
     let user = result
         .get("user")
         .and_then(Value::as_str)
@@ -220,7 +226,7 @@ async fn confirm_sign_in(upstream: &mut Upstream, command: Value) -> Result<Stri
 /// `helix_tx` is optional: when `Some`, any notifications received while
 /// waiting are forwarded to Helix rather than discarded.
 async fn await_response(
-    req_id: u64,
+    req_id: &Value,
     upstream: &mut Upstream,
     helix_tx: Option<&mpsc::Sender<Message>>,
 ) -> Result<Value> {
@@ -230,7 +236,7 @@ async fn await_response(
             .await
             .context("upstream closed while waiting for response")?;
 
-        if msg.is_response() && msg.id == Some(json!(req_id)) {
+        if msg.is_response() && msg.id.as_ref() == Some(req_id) {
             if let Some(err) = msg.error {
                 anyhow::bail!("RPC error {}: {}", err.code, err.message);
             }
@@ -245,6 +251,10 @@ async fn await_response(
             }
         }
     }
+}
+
+fn internal_request_id(name: &str) -> Value {
+    Value::String(name.to_owned())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

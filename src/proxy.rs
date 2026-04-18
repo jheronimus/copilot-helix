@@ -57,19 +57,20 @@ impl Proxy {
             initializer::run_handshake(&mut helix_in, &helix_tx, &upstream_tx, &mut self.upstream)
                 .await?;
 
+        // ── Phase 1b: auth check ──────────────────────────────────────────
+        // Run this before replaying buffered Helix messages so auth does not
+        // temporarily own the upstream response stream while an early
+        // completion response is in flight.
+        if let Err(e) = auth::check_and_warn(&upstream_tx, &mut self.upstream, &helix_tx).await {
+            debug!(error = %e, "auth check failed (non-fatal)");
+        }
+
         for msg in buffered {
             let out = prepare_helix_message(msg, &translator);
             if upstream_tx.send(out).await.is_err() {
                 writer_task.abort();
                 return Ok(());
             }
-        }
-
-        // ── Phase 1b: auth check ──────────────────────────────────────────
-        // Non-fatal: a warning is sent to Helix if not authenticated, but
-        // we continue running so the user can see the message.
-        if let Err(e) = auth::check_and_warn(&upstream_tx, &mut self.upstream, &helix_tx).await {
-            debug!(error = %e, "auth check failed (non-fatal)");
         }
 
         // ── Phase 2: bidirectional proxy tasks ───────────────────────────

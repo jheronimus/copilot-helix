@@ -3,16 +3,15 @@
 `copilot-helix` is a small Rust binary that lets Helix use GitHub Copilot by
 proxying Helix LSP completion requests to the official Copilot language server.
 
-## How to build
+## How to build and install
 
 ```sh
 git clone https://github.com/jheronimus/copilot-helix
 cd copilot-helix
-cargo build --release
+cargo install --path .
 ```
 
-The release binary will be at `target/release/copilot-helix`. Put it on your
-`PATH` if you want to run it from Helix.
+This compiles a release binary and installs it to `~/.cargo/bin/copilot-helix`, which is on your `$PATH` after a standard Rust installation.
 
 ## First run
 

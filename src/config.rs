@@ -1,42 +1,42 @@
-//! Resolves the command used to launch the cached Copilot language server.
+//! Resolves the command used to launch the Copilot language server.
 
 use anyhow::{bail, Context, Result};
-use directories::BaseDirs;
 use std::{
     ffi::OsString,
     fs::File,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 const PACKAGE_NAME: &str = "@github/copilot-language-server";
 pub const PACKAGE_VERSION: &str = "1.472.0";
 const STDIO_FLAG: &str = "--stdio";
-const CACHED_SCRIPT_RELATIVE_PATH: &str =
-    "node_modules/@github/copilot-language-server/dist/language-server.js";
+/// Path of the language server script relative to the npm global node_modules root.
+const GLOBAL_SCRIPT_RELATIVE_PATH: &str = "@github/copilot-language-server/dist/language-server.js";
 
 /// Runtime command needed to start the language server subprocess.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Executable to spawn (`node` for both local override and cached modes).
+    /// Executable to spawn.
     pub program: PathBuf,
     /// Arguments passed to `program`.
     pub args: Vec<OsString>,
 }
 
 impl Config {
-    /// Detect the runtime command from environment variables and the local cache.
+    /// Detect the runtime command from environment variables or the global npm install.
     ///
     /// Search order:
     /// - `COPILOT_LS_PATH` + (`COPILOT_NODE` or `node` on `$PATH`)
-    /// - cached pinned install under the OS cache directory
+    /// - globally installed package resolved via `npm root -g`
     pub fn detect() -> Result<Self> {
-        Self::detect_with(overrides_from_env(), which, cached_language_server_path)
+        Self::detect_with(overrides_from_env(), which, global_language_server_path)
     }
 
     fn detect_with<F, G>(
         overrides: EnvOverrides,
         mut lookup_path: F,
-        resolve_cached_path: G,
+        resolve_global_path: G,
     ) -> Result<Self>
     where
         F: FnMut(&str) -> Option<PathBuf>,
@@ -51,7 +51,7 @@ impl Config {
             });
         }
 
-        let language_server_path = resolve_cached_path()?;
+        let language_server_path = resolve_global_path()?;
         let program = locate_node(overrides.node_path, &mut lookup_path)?;
         Ok(Self {
             program,
@@ -77,36 +77,49 @@ pub fn package_spec() -> String {
     format!("{PACKAGE_NAME}@{PACKAGE_VERSION}")
 }
 
-pub fn cache_install_dir() -> Result<PathBuf> {
-    let cache_root = BaseDirs::new()
-        .context("could not determine OS cache directory")?
-        .cache_dir()
-        .to_path_buf();
+/// Returns the npm global `node_modules` directory by running `npm root -g`.
+pub fn npm_global_root() -> Result<PathBuf> {
+    let npm = npm_path()?;
+    let output = Command::new(&npm)
+        .args(["root", "-g"])
+        .output()
+        .with_context(|| format!("running {} root -g", npm.display()))?;
 
-    Ok(cached_install_dir_for(&cache_root))
+    if !output.status.success() {
+        bail!("npm root -g failed with status {}", output.status);
+    }
+
+    let root = String::from_utf8(output.stdout).context("npm root -g output is not valid UTF-8")?;
+
+    Ok(PathBuf::from(root.trim()))
 }
 
-pub fn cached_language_server_path() -> Result<PathBuf> {
-    let script_path = cached_language_server_path_for(&cache_install_dir()?);
-    validate_readable_file(&script_path, "cached Copilot language server").with_context(|| {
+pub fn global_language_server_path() -> Result<PathBuf> {
+    let script_path = global_language_server_path_for(&npm_global_root()?);
+    validate_readable_file(&script_path, "Copilot language server").with_context(|| {
         format!(
-            "cached Copilot language server v{PACKAGE_VERSION} not found. \
+            "Copilot language server v{PACKAGE_VERSION} not found in global npm install. \
              Run `copilot-helix --install-ls` or set COPILOT_LS_PATH=/path/to/language-server.js"
         )
     })?;
     Ok(script_path)
 }
 
-pub fn cached_language_server_path_if_exists() -> Result<Option<PathBuf>> {
-    cached_language_server_path_if_exists_for(&cache_install_dir()?)
+pub fn global_language_server_path_if_exists() -> Result<Option<PathBuf>> {
+    let npm_root = match npm_global_root() {
+        Ok(root) => root,
+        Err(_) => return Ok(None),
+    };
+    let script_path = global_language_server_path_for(&npm_root);
+    if !script_path.is_file() {
+        return Ok(None);
+    }
+    validate_readable_file(&script_path, "Copilot language server")?;
+    Ok(Some(script_path))
 }
 
 pub fn npm_path() -> Result<PathBuf> {
     which("npm").context("npm not found in $PATH — install Node.js/npm ≥22")
-}
-
-pub fn npx_path() -> Result<PathBuf> {
-    which("npx").context("npx not found in $PATH — install Node.js/npm ≥22")
 }
 
 fn locate_node<F>(explicit_node_path: Option<PathBuf>, lookup_path: &mut F) -> Result<PathBuf>
@@ -122,25 +135,8 @@ where
     }
 }
 
-fn cached_install_dir_for(cache_root: &Path) -> PathBuf {
-    cache_root
-        .join("copilot-helix")
-        .join("copilot-language-server")
-        .join(PACKAGE_VERSION)
-}
-
-pub fn cached_language_server_path_for(install_dir: &Path) -> PathBuf {
-    install_dir.join(CACHED_SCRIPT_RELATIVE_PATH)
-}
-
-pub fn cached_language_server_path_if_exists_for(install_dir: &Path) -> Result<Option<PathBuf>> {
-    let script_path = cached_language_server_path_for(install_dir);
-    if !script_path.is_file() {
-        return Ok(None);
-    }
-
-    validate_readable_file(&script_path, "cached Copilot language server")?;
-    Ok(Some(script_path))
+pub fn global_language_server_path_for(npm_root: &Path) -> PathBuf {
+    npm_root.join(GLOBAL_SCRIPT_RELATIVE_PATH)
 }
 
 fn validate_existing_file(path: PathBuf, var_name: &str) -> Result<PathBuf> {
@@ -215,63 +211,48 @@ mod tests {
     }
 
     #[test]
-    fn detect_uses_cached_install_by_default() {
+    fn detect_uses_global_install_by_default() {
         let node_path = PathBuf::from("/usr/bin/node");
-        let cached_path = PathBuf::from("/cache/copilot-language-server/dist/language-server.js");
+        let global_path = PathBuf::from(
+            "/usr/local/lib/node_modules/@github/copilot-language-server/dist/language-server.js",
+        );
 
         let config = Config::detect_with(
             EnvOverrides::default(),
             |name| (name == "node").then(|| node_path.clone()),
-            || Ok(cached_path.clone()),
+            || Ok(global_path.clone()),
         )
         .unwrap();
 
         assert_eq!(config.program, node_path);
         assert_eq!(
             config.args,
-            vec![cached_path.into_os_string(), OsString::from(STDIO_FLAG)]
+            vec![global_path.into_os_string(), OsString::from(STDIO_FLAG)]
         );
     }
 
     #[test]
-    fn missing_cached_install_without_override_errors() {
+    fn missing_global_install_without_override_errors() {
         let node_path = PathBuf::from("/usr/bin/node");
         let err = Config::detect_with(
             EnvOverrides::default(),
             |name| (name == "node").then(|| node_path.clone()),
-            || anyhow::bail!("cached install missing"),
+            || anyhow::bail!("global install missing"),
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("cached install missing"));
+        assert!(err.to_string().contains("global install missing"));
     }
 
     #[test]
-    fn cache_path_is_versioned_and_deterministic() {
-        let cache_root = PathBuf::from("/tmp/cache-root");
-        let install_dir = cached_install_dir_for(&cache_root);
-        let script_path = cached_language_server_path_for(&install_dir);
+    fn global_path_is_deterministic() {
+        let npm_root = PathBuf::from("/usr/local/lib/node_modules");
+        let script_path = global_language_server_path_for(&npm_root);
 
-        assert_eq!(
-            install_dir,
-            cache_root
-                .join("copilot-helix")
-                .join("copilot-language-server")
-                .join(PACKAGE_VERSION)
-        );
         assert_eq!(
             script_path,
-            install_dir
-                .join("node_modules/@github/copilot-language-server/dist/language-server.js")
+            npm_root.join("@github/copilot-language-server/dist/language-server.js")
         );
-    }
-
-    #[test]
-    fn cached_language_server_probe_returns_none_when_missing() {
-        let missing_dir = PathBuf::from("/tmp/copilot-helix-missing");
-        let detected = cached_language_server_path_if_exists_for(&missing_dir).unwrap();
-
-        assert_eq!(detected, None);
     }
 
     fn temp_file(name: &str) -> PathBuf {

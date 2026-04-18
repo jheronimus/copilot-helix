@@ -4,9 +4,9 @@ use std::io::{self, Write};
 use crate::{auth, config, helix, installer};
 
 pub async fn run_setup() -> Result<()> {
-    if config::cached_language_server_path_if_exists()?.is_none() {
-        println!("GitHub Copilot language server is not installed in the local cache.");
-        if !prompt_yes_no("Install it now with npx? [y/N] ")? {
+    if config::global_language_server_path_if_exists()?.is_none() {
+        println!("GitHub Copilot language server is not installed.");
+        if !prompt_yes_no("Install it globally with npm? [y/N] ")? {
             println!("Setup stopped without installing the language server.");
             return Ok(());
         }
@@ -42,11 +42,17 @@ pub async fn run_setup() -> Result<()> {
             "Helix is not configured to use copilot-helix in {}.",
             helix_status.path.display()
         );
-        println!("Append this example to your languages.toml:");
+        println!();
+        println!(
+            "The following is an example — adapt it to the languages you use. \
+Add one [[language]] entry per language you want Copilot completions in. \
+copilot-helix works with any language both Helix and GitHub Copilot support, \
+including Rust, Python, JavaScript, TypeScript, Go, C, C++, and more."
+        );
         println!();
         println!("{}", helix_config_example());
         println!();
-        println!("Then run `copilot-helix` again.");
+        println!("After editing your languages.toml, start Helix.");
         return Ok(());
     }
 
@@ -74,7 +80,11 @@ args = ["--stdio"]
 
 [[language]]
 name = "rust"
-language-servers = ["rust-analyzer", "copilot"]"#
+language-servers = ["rust-analyzer", "copilot"]
+
+[[language]]
+name = "python"
+language-servers = ["pylsp", "copilot"]"#
 }
 
 #[cfg(test)]

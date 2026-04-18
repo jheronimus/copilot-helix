@@ -2,9 +2,9 @@ use anyhow::{bail, Result};
 use copilot_helix::{
     auth,
     config::{self, Config},
-    setup,
     installer,
     proxy::Proxy,
+    setup,
     upstream::Upstream,
 };
 use tracing_subscriber::EnvFilter;

@@ -87,7 +87,10 @@ pub async fn check_auth_status() -> Result<AuthStatus> {
     request_auth_status(&mut upstream, false).await
 }
 
-async fn request_auth_status(upstream: &mut Upstream, local_checks_only: bool) -> Result<AuthStatus> {
+async fn request_auth_status(
+    upstream: &mut Upstream,
+    local_checks_only: bool,
+) -> Result<AuthStatus> {
     let request_id = internal_request_id(CHECK_STATUS_REQUEST_ID);
     upstream
         .send(Message::request_with_id(

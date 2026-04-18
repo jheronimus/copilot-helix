@@ -46,9 +46,7 @@ pub fn route(method: Option<&str>, dir: Direction) -> RouteAction {
         ("statusNotification", Direction::UpstreamToHelix) => RouteAction::Drop,
         ("policy/didChange", Direction::UpstreamToHelix) => RouteAction::Drop,
         ("copilot/mcpTools", Direction::UpstreamToHelix) => RouteAction::Drop,
-        ("conversation/preconditionsNotification", Direction::UpstreamToHelix) => {
-            RouteAction::Drop
-        }
+        ("conversation/preconditionsNotification", Direction::UpstreamToHelix) => RouteAction::Drop,
 
         _ => RouteAction::PassThrough,
     }

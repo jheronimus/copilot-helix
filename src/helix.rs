@@ -79,7 +79,10 @@ fn language_uses_server(value: &toml::Value, server_name: &str) -> bool {
 
 fn command_points_to_copilot_helix(command: &str) -> bool {
     let path = Path::new(command);
-    let Some(file_name) = path.file_name().or_else(|| (!command.is_empty()).then_some(OsStr::new(command))) else {
+    let Some(file_name) = path
+        .file_name()
+        .or_else(|| (!command.is_empty()).then_some(OsStr::new(command)))
+    else {
         return false;
     };
 

@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use copilot_helix::{
     auth,
     config::{self, Config},
+    setup,
     installer,
     proxy::Proxy,
     upstream::Upstream,
@@ -19,7 +20,8 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(String::as_str) {
-        Some("--stdio") | None => run_proxy().await,
+        Some("--stdio") => run_proxy().await,
+        None => setup::run_setup().await,
         Some("--auth") => auth::run_auth_flow().await,
         Some("--install-ls") => install_language_server().await,
         Some(flag) => {
@@ -43,4 +45,13 @@ async fn install_language_server() -> Result<()> {
         installed_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_usage_mentions_stdio_explicitly() {
+        let usage = "Usage: copilot-helix [--stdio | --auth | --install-ls]";
+        assert!(usage.contains("--stdio"));
+    }
 }

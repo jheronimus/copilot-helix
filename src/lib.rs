@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod config;
+pub mod helix;
 pub mod initializer;
 pub mod installer;
 pub mod jsonrpc;
 pub mod proxy;
 pub mod router;
+pub mod setup;
 pub mod translator;
 pub mod upstream;

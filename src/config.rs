@@ -97,8 +97,16 @@ pub fn cached_language_server_path() -> Result<PathBuf> {
     Ok(script_path)
 }
 
+pub fn cached_language_server_path_if_exists() -> Result<Option<PathBuf>> {
+    cached_language_server_path_if_exists_for(&cache_install_dir()?)
+}
+
 pub fn npm_path() -> Result<PathBuf> {
     which("npm").context("npm not found in $PATH — install Node.js/npm ≥22")
+}
+
+pub fn npx_path() -> Result<PathBuf> {
+    which("npx").context("npx not found in $PATH — install Node.js/npm ≥22")
 }
 
 fn locate_node<F>(explicit_node_path: Option<PathBuf>, lookup_path: &mut F) -> Result<PathBuf>
@@ -123,6 +131,16 @@ fn cached_install_dir_for(cache_root: &Path) -> PathBuf {
 
 pub fn cached_language_server_path_for(install_dir: &Path) -> PathBuf {
     install_dir.join(CACHED_SCRIPT_RELATIVE_PATH)
+}
+
+pub fn cached_language_server_path_if_exists_for(install_dir: &Path) -> Result<Option<PathBuf>> {
+    let script_path = cached_language_server_path_for(install_dir);
+    if !script_path.is_file() {
+        return Ok(None);
+    }
+
+    validate_readable_file(&script_path, "cached Copilot language server")?;
+    Ok(Some(script_path))
 }
 
 fn validate_existing_file(path: PathBuf, var_name: &str) -> Result<PathBuf> {
@@ -246,6 +264,14 @@ mod tests {
             install_dir
                 .join("node_modules/@github/copilot-language-server/dist/language-server.js")
         );
+    }
+
+    #[test]
+    fn cached_language_server_probe_returns_none_when_missing() {
+        let missing_dir = PathBuf::from("/tmp/copilot-helix-missing");
+        let detected = cached_language_server_path_if_exists_for(&missing_dir).unwrap();
+
+        assert_eq!(detected, None);
     }
 
     fn temp_file(name: &str) -> PathBuf {

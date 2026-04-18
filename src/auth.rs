@@ -23,6 +23,12 @@ const INITIALIZE_REQUEST_ID: &str = "copilot-helix:auth:initialize";
 const SIGN_IN_REQUEST_ID: &str = "copilot-helix:auth:sign-in";
 const EXECUTE_COMMAND_REQUEST_ID: &str = "copilot-helix:auth:execute-command";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthStatus {
+    Authenticated(Option<String>),
+    Unauthenticated(String),
+}
+
 // ── Proxy-mode: status check ──────────────────────────────────────────────────
 
 /// Send `checkStatus` to the language server after initialisation.
@@ -51,30 +57,65 @@ pub async fn check_and_warn(
         .await
         .context("waiting for checkStatus response")?;
 
-    let status_str = status
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("Unknown");
-    let user = status.get("user").and_then(Value::as_str).unwrap_or("");
-
-    if status_str == "OK" || status_str == "MaybeOK" {
-        if !user.is_empty() {
+    match classify_status(&status) {
+        AuthStatus::Authenticated(Some(user)) => {
             debug!("copilot authenticated as {user}");
         }
-    } else {
-        debug!("copilot not authenticated: {status_str}");
-        let _ = helix_tx
-            .send(Message::notification(
-                "window/showMessage",
-                json!({
-                    "type": 2,  // Warning
-                    "message": "GitHub Copilot: not authenticated. Run: copilot-helix --auth"
-                }),
-            ))
-            .await;
+        AuthStatus::Authenticated(None) => {}
+        AuthStatus::Unauthenticated(status_str) => {
+            debug!("copilot not authenticated: {status_str}");
+            let _ = helix_tx
+                .send(Message::notification(
+                    "window/showMessage",
+                    json!({
+                        "type": 2,  // Warning
+                        "message": "GitHub Copilot: not authenticated. Run: copilot-helix --auth"
+                    }),
+                ))
+                .await;
+        }
     }
 
     Ok(())
+}
+
+pub async fn check_auth_status() -> Result<AuthStatus> {
+    let config = Config::detect()?;
+    let mut upstream = Upstream::spawn(&config).await?;
+
+    init_upstream(&mut upstream).await?;
+    request_auth_status(&mut upstream, false).await
+}
+
+async fn request_auth_status(upstream: &mut Upstream, local_checks_only: bool) -> Result<AuthStatus> {
+    let request_id = internal_request_id(CHECK_STATUS_REQUEST_ID);
+    upstream
+        .send(Message::request_with_id(
+            request_id.clone(),
+            "checkStatus",
+            json!({ "options": { "localChecksOnly": local_checks_only } }),
+        ))
+        .await?;
+
+    let status = await_response(&request_id, upstream, None).await?;
+    Ok(classify_status(&status))
+}
+
+fn classify_status(status: &Value) -> AuthStatus {
+    let status_str = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown")
+        .to_owned();
+    let user = status
+        .get("user")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    match status_str.as_str() {
+        "OK" | "MaybeOK" | "AlreadySignedIn" => AuthStatus::Authenticated(user),
+        _ => AuthStatus::Unauthenticated(status_str),
+    }
 }
 
 // ── --auth mode: interactive OAuth device flow ────────────────────────────────
@@ -90,25 +131,16 @@ pub async fn run_auth_flow() -> Result<()> {
     init_upstream(&mut upstream).await?;
 
     // Check whether the user is already signed in.
-    let request_id = internal_request_id(CHECK_STATUS_REQUEST_ID);
-    upstream
-        .send(Message::request_with_id(
-            request_id.clone(),
-            "checkStatus",
-            json!({ "options": { "localChecksOnly": false } }),
-        ))
-        .await?;
-
-    let status = await_response(&request_id, &mut upstream, None).await?;
-    let status_str = status
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("Unknown");
-
-    if status_str == "OK" || status_str == "MaybeOK" || status_str == "AlreadySignedIn" {
-        let user = status.get("user").and_then(Value::as_str).unwrap_or("?");
-        println!("Already authenticated as GitHub user {user}");
-        return Ok(());
+    match request_auth_status(&mut upstream, false).await? {
+        AuthStatus::Authenticated(Some(user)) => {
+            println!("Already authenticated as GitHub user {user}");
+            return Ok(());
+        }
+        AuthStatus::Authenticated(None) => {
+            println!("Already authenticated with GitHub Copilot");
+            return Ok(());
+        }
+        AuthStatus::Unauthenticated(_) => {}
     }
 
     // Kick off the device flow.
@@ -284,5 +316,24 @@ mod tests {
         );
         assert!(msg.is_notification());
         assert_eq!(msg.params.unwrap()["type"], 2);
+    }
+
+    #[test]
+    fn classify_status_recognizes_authenticated_user() {
+        let status = classify_status(&json!({
+            "status": "OK",
+            "user": "alice"
+        }));
+
+        assert_eq!(status, AuthStatus::Authenticated(Some("alice".into())));
+    }
+
+    #[test]
+    fn classify_status_recognizes_missing_auth() {
+        let status = classify_status(&json!({
+            "status": "NotAuthorized"
+        }));
+
+        assert_eq!(status, AuthStatus::Unauthenticated("NotAuthorized".into()));
     }
 }

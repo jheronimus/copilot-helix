@@ -1,0 +1,278 @@
+//! GitHub Copilot authentication handling.
+//!
+//! Two entry points:
+//! - [`check_and_warn`] — called once after proxy initialisation; sends a
+//!   `window/showMessage` to Helix when the user is not signed in.
+//! - [`run_auth_flow`] — the interactive `--auth` CLI mode that walks the user
+//!   through the GitHub device-flow OAuth dance.
+
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+use tokio::{sync::mpsc, time};
+use tracing::debug;
+
+use crate::{
+    config::Config,
+    initializer::{build_did_change_configuration, build_initialization_options},
+    jsonrpc::Message,
+    upstream::Upstream,
+};
+
+// ── Proxy-mode: status check ──────────────────────────────────────────────────
+
+/// Send `checkStatus` to the language server after initialisation.
+///
+/// If the response indicates the user is not signed in, sends a
+/// `window/showMessage` warning to Helix via `helix_tx`.
+/// Any upstream notifications received while waiting are forwarded to Helix.
+pub async fn check_and_warn(
+    upstream_tx: &mpsc::Sender<Message>,
+    upstream: &mut Upstream,
+    helix_tx: &mpsc::Sender<Message>,
+) -> Result<()> {
+    const CHECK_ID: u64 = 1;
+    debug!("sending checkStatus");
+
+    upstream_tx
+        .send(Message::request(
+            CHECK_ID,
+            "checkStatus",
+            json!({ "options": { "localChecksOnly": true } }),
+        ))
+        .await
+        .map_err(|_| anyhow::anyhow!("upstream closed before checkStatus"))?;
+
+    let status = await_response(CHECK_ID, upstream, Some(helix_tx))
+        .await
+        .context("waiting for checkStatus response")?;
+
+    let status_str = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown");
+    let user = status.get("user").and_then(Value::as_str).unwrap_or("");
+
+    if status_str == "OK" || status_str == "MaybeOK" {
+        if !user.is_empty() {
+            debug!("copilot authenticated as {user}");
+        }
+    } else {
+        debug!("copilot not authenticated: {status_str}");
+        let _ = helix_tx
+            .send(Message::notification(
+                "window/showMessage",
+                json!({
+                    "type": 2,  // Warning
+                    "message": "GitHub Copilot: not authenticated. Run: copilot-helix --auth"
+                }),
+            ))
+            .await;
+    }
+
+    Ok(())
+}
+
+// ── --auth mode: interactive OAuth device flow ────────────────────────────────
+
+const AUTH_TIMEOUT: time::Duration = time::Duration::from_secs(600); // 10 min
+
+/// Interactive authentication flow.  Runs to completion and exits cleanly.
+pub async fn run_auth_flow() -> Result<()> {
+    let config = Config::detect()?;
+    let mut upstream = Upstream::spawn(&config).await?;
+
+    // Minimal LSP initialise — no Helix side, just enough to use auth methods.
+    init_upstream(&mut upstream).await?;
+
+    // Check whether the user is already signed in.
+    const CHECK_ID: u64 = 1;
+    upstream
+        .send(Message::request(
+            CHECK_ID,
+            "checkStatus",
+            json!({ "options": { "localChecksOnly": false } }),
+        ))
+        .await?;
+
+    let status = await_response(CHECK_ID, &mut upstream, None).await?;
+    let status_str = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown");
+
+    if status_str == "OK" || status_str == "MaybeOK" || status_str == "AlreadySignedIn" {
+        let user = status.get("user").and_then(Value::as_str).unwrap_or("?");
+        println!("Already authenticated as GitHub user {user}");
+        return Ok(());
+    }
+
+    // Kick off the device flow.
+    const SIGN_IN_ID: u64 = 2;
+    upstream
+        .send(Message::request(SIGN_IN_ID, "signIn", json!({})))
+        .await?;
+
+    let sign_in_data = await_response(SIGN_IN_ID, &mut upstream, None).await?;
+
+    let verification_uri = sign_in_data
+        .get("verificationUri")
+        .and_then(Value::as_str)
+        .context("signIn response missing verificationUri")?;
+    let user_code = sign_in_data
+        .get("userCode")
+        .and_then(Value::as_str)
+        .context("signIn response missing userCode")?;
+
+    // If the server reports we're already signed in at this point, we're done.
+    if sign_in_data.get("status").and_then(Value::as_str) == Some("AlreadySignedIn") {
+        let user = sign_in_data
+            .get("user")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        println!("Authenticated as GitHub user {user}");
+        return Ok(());
+    }
+
+    let command = sign_in_data.get("command").cloned().unwrap_or(Value::Null);
+
+    eprintln!("Open this URL in your browser:");
+    eprintln!("  {verification_uri}");
+    eprintln!();
+    eprintln!("Enter this code when prompted:");
+    eprintln!("  {user_code}");
+    eprintln!();
+    eprintln!("Waiting for authentication…");
+
+    // Ask the language server to poll GitHub until the user completes the flow.
+    let result = time::timeout(AUTH_TIMEOUT, confirm_sign_in(&mut upstream, command)).await;
+
+    match result {
+        Ok(Ok(user)) => {
+            println!("Authenticated as GitHub user {user}");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => anyhow::bail!("authentication timed out after 10 minutes"),
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Minimal LSP initialise / initialized / didChangeConfiguration sequence.
+/// Used only in `--auth` mode where there is no Helix client.
+async fn init_upstream(upstream: &mut Upstream) -> Result<()> {
+    const INIT_ID: u64 = 0;
+    let initialization_options = build_initialization_options("unknown");
+
+    upstream
+        .send(Message::request(
+            INIT_ID,
+            "initialize",
+            json!({
+                "capabilities": {
+                    "workspace": {
+                        "didChangeConfiguration": { "dynamicRegistration": true }
+                    }
+                },
+                "initializationOptions": initialization_options
+            }),
+        ))
+        .await?;
+
+    // Wait for initialize response; discard notifications.
+    await_response(INIT_ID, upstream, None).await?;
+
+    upstream
+        .send(Message::notification("initialized", json!({})))
+        .await?;
+
+    upstream.send(build_did_change_configuration()).await?;
+
+    Ok(())
+}
+
+/// Execute the `workspace/executeCommand` from `signIn` and return the
+/// authenticated username on success.
+async fn confirm_sign_in(upstream: &mut Upstream, command: Value) -> Result<String> {
+    const EXEC_ID: u64 = 3;
+    upstream
+        .send(Message {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(EXEC_ID)),
+            method: Some("workspace/executeCommand".into()),
+            params: Some(command),
+            result: None,
+            error: None,
+        })
+        .await?;
+
+    let result = await_response(EXEC_ID, upstream, None).await?;
+    let user = result
+        .get("user")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
+    Ok(user)
+}
+
+/// Read messages from `upstream` until a response with `id == req_id` arrives.
+///
+/// `helix_tx` is optional: when `Some`, any notifications received while
+/// waiting are forwarded to Helix rather than discarded.
+async fn await_response(
+    req_id: u64,
+    upstream: &mut Upstream,
+    helix_tx: Option<&mpsc::Sender<Message>>,
+) -> Result<Value> {
+    loop {
+        let msg = upstream
+            .recv()
+            .await
+            .context("upstream closed while waiting for response")?;
+
+        if msg.is_response() && msg.id == Some(json!(req_id)) {
+            if let Some(err) = msg.error {
+                anyhow::bail!("RPC error {}: {}", err.code, err.message);
+            }
+            return Ok(msg.result.unwrap_or(Value::Null));
+        }
+
+        // Not our response — only forward notifications. Unrelated responses
+        // would confuse Helix because it never sent the corresponding request.
+        if msg.is_notification() {
+            if let Some(tx) = helix_tx {
+                let _ = tx.send(msg).await;
+            }
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sanity-check that the messages we build are well-formed.
+    #[test]
+    fn check_status_request_shape() {
+        let msg = Message::request(
+            u64::MAX,
+            "checkStatus",
+            json!({ "options": { "localChecksOnly": true } }),
+        );
+        assert!(msg.is_request());
+        assert_eq!(msg.method(), Some("checkStatus"));
+        assert_eq!(msg.params.unwrap()["options"]["localChecksOnly"], true);
+    }
+
+    #[test]
+    fn window_show_message_is_notification() {
+        let msg = Message::notification(
+            "window/showMessage",
+            json!({ "type": 2, "message": "test" }),
+        );
+        assert!(msg.is_notification());
+        assert_eq!(msg.params.unwrap()["type"], 2);
+    }
+}

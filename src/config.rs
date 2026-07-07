@@ -157,7 +157,7 @@ fn validate_readable_file(path: &Path, name: &str) -> Result<()> {
 }
 
 /// Find `name` on `$PATH`, returning the first match as an absolute path.
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(name);

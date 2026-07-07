@@ -20,17 +20,15 @@ pub fn languages_toml_path() -> Result<PathBuf> {
 pub fn detect_languages_toml() -> Result<HelixConfigStatus> {
     let path = languages_toml_path()?;
     let contents = std::fs::read_to_string(&path).ok();
-    let mut status = analyze_languages_toml(contents.as_deref())?;
-    status.path = path;
-    Ok(status)
+    analyze_languages_toml(contents.as_deref(), path)
 }
 
-pub fn analyze_languages_toml(contents: Option<&str>) -> Result<HelixConfigStatus> {
+pub fn analyze_languages_toml(contents: Option<&str>, path: PathBuf) -> Result<HelixConfigStatus> {
     let Some(contents) = contents else {
         return Ok(HelixConfigStatus {
             is_configured: false,
             server_name: None,
-            path: PathBuf::new(),
+            path,
         });
     };
 
@@ -43,7 +41,7 @@ pub fn analyze_languages_toml(contents: Option<&str>) -> Result<HelixConfigStatu
     Ok(HelixConfigStatus {
         is_configured,
         server_name: matching_server,
-        path: PathBuf::new(),
+        path,
     })
 }
 
@@ -95,20 +93,23 @@ mod tests {
 
     #[test]
     fn detects_missing_config_file_as_unconfigured() {
-        let status = analyze_languages_toml(None).expect("status");
+        let status = analyze_languages_toml(None, PathBuf::new()).expect("status");
 
         assert!(!status.is_configured);
     }
 
     #[test]
     fn requires_matching_server_block_and_language_reference() {
-        let status = analyze_languages_toml(Some(
-            r#"
+        let status = analyze_languages_toml(
+            Some(
+                r#"
 [language-server.copilot]
 command = "copilot-helix"
 args = ["--stdio"]
 "#,
-        ))
+            ),
+            PathBuf::new(),
+        )
         .expect("status");
 
         assert!(!status.is_configured);
@@ -116,8 +117,9 @@ args = ["--stdio"]
 
     #[test]
     fn accepts_absolute_copilot_helix_command_with_language_usage() {
-        let status = analyze_languages_toml(Some(
-            r#"
+        let status = analyze_languages_toml(
+            Some(
+                r#"
 [language-server.ai]
 command = "/tmp/copilot-helix"
 args = ["--stdio"]
@@ -126,7 +128,9 @@ args = ["--stdio"]
 name = "rust"
 language-servers = ["rust-analyzer", "ai"]
 "#,
-        ))
+            ),
+            PathBuf::new(),
+        )
         .expect("status");
 
         assert!(status.is_configured);

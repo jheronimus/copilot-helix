@@ -84,22 +84,6 @@ impl Message {
         }
     }
 
-    /// Build an error response for the given request id.
-    pub fn error_response(id: Value, code: i64, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            id: Some(id),
-            method: None,
-            params: None,
-            result: None,
-            error: Some(RpcError {
-                code,
-                message: message.into(),
-                data: None,
-            }),
-        }
-    }
-
     /// Build a notification (no id).
     pub fn notification(method: impl Into<String>, params: Value) -> Self {
         Self {
@@ -112,11 +96,6 @@ impl Message {
         }
     }
 
-    /// Build a request with the given numeric id.
-    pub fn request(id: u64, method: impl Into<String>, params: Value) -> Self {
-        Self::request_with_id(Value::Number(id.into()), method, params)
-    }
-
     /// Build a request with an arbitrary JSON-RPC id.
     pub fn request_with_id(id: Value, method: impl Into<String>, params: Value) -> Self {
         Self {
@@ -126,6 +105,30 @@ impl Message {
             params: Some(params),
             result: None,
             error: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Message {
+    /// Build a request with a numeric id (test-only convenience).
+    pub fn request(id: u64, method: impl Into<String>, params: Value) -> Self {
+        Self::request_with_id(Value::Number(id.into()), method, params)
+    }
+
+    /// Build an error response (test-only convenience).
+    pub fn error_response(id: Value, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            method: None,
+            params: None,
+            result: None,
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 }

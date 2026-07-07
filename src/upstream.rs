@@ -176,7 +176,7 @@ mod tests {
     /// The script reads one framed JSON-RPC message and echoes it back.
     #[tokio::test]
     async fn echo_round_trip() {
-        let node = match which("node") {
+        let node = match crate::config::which("node") {
             Some(p) => p,
             None => {
                 eprintln!("skipping echo_round_trip: node not found in PATH");
@@ -220,16 +220,5 @@ process.stdin.on('data', chunk => {
 
         assert_eq!(got.id, Some(json!(1)));
         assert_eq!(got.method(), Some("ping"));
-    }
-
-    fn which(name: &str) -> Option<PathBuf> {
-        let path_var = std::env::var_os("PATH")?;
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        None
     }
 }
